@@ -14,12 +14,9 @@ from typing import Callable, Coroutine, Iterable, List, Union
 import aiofiles
 import aiofiles.os
 import aiojobs
+from aiogram.enums import MessageEntityType
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
-from aiogram.utils.exceptions import (
-    BadRequest,
-    InvalidHTTPUrlContent,
-    WrongFileIdentifier,
-)
 from PIL import Image
 
 from nazurin.models import Caption
@@ -27,24 +24,35 @@ from nazurin.utils.decorators import async_wrap
 
 from . import logger
 
+FILENAME_MAX_LENGTH = 255
+CAPTION_MAX_LENGTH = 1024
 
-async def handle_bad_request(message: Message, error: BadRequest):
+
+WRONG_FILE_IDENTIFIER = "Wrong file identifier/HTTP URL specified"
+INVALID_HTTP_URL_CONTENT = "Failed to get HTTP URL content"
+GROUP_SEND_FAILED = "Group send failed"
+
+
+async def handle_bad_request(message: Message, error: TelegramBadRequest):
     logger.error("BadRequest exception: {}", error)
     if not message:
         return
-    if isinstance(error, (WrongFileIdentifier, InvalidHTTPUrlContent)):
+    if (
+        WRONG_FILE_IDENTIFIER in error.message
+        or INVALID_HTTP_URL_CONTENT in error.message
+    ):
         await message.reply(
             "Failed to send image as photo, maybe the size is too big, "
             "consider using download option or try again.\n"
             f"Message: {message.text}\n"
-            f"Error: {error}"
+            f"Error: {error}",
         )
-    elif "Group send failed" in str(error):
+    elif GROUP_SEND_FAILED in error.message:
         await message.reply(
             "Failed to send images because one of them is too large, "
             "consider using download option or try again.\n"
             f"Message: {message.text}\n"
-            f"Error: {error}"
+            f"Error: {error}",
         )
     else:
         raise error
@@ -69,13 +77,14 @@ def sanitize_filename(name: str) -> str:
     if Path(filename).is_reserved():
         filename = "_" + filename
     name = filename + ext
-    if len(name) > 255:
-        name = filename[: 255 - len(ext)] + ext
+    if len(name) > FILENAME_MAX_LENGTH:
+        name = filename[: FILENAME_MAX_LENGTH - len(ext)] + ext
     return name
 
 
 def sanitize_path(
-    path: os.PathLike, sanitize: Callable[[str], str] = sanitize_path_segment
+    path: os.PathLike,
+    sanitize: Callable[[str], str] = sanitize_path_segment,
 ) -> pathlib.PurePath:
     """
     Remove invalid characters from a path.
@@ -91,7 +100,7 @@ def sanitize_path(
 
 def sanitize_caption(caption: Caption) -> str:
     content = caption.text
-    if len(content) > 1024:
+    if len(content) > CAPTION_MAX_LENGTH:
         content = content[:1024]
     content = escape(content, quote=False)
     return content
@@ -110,9 +119,9 @@ def get_urls_from_message(message: Message) -> List[str]:
     text = text.encode("utf-16-le")
     urls = []
     for item in entities:
-        if item.type == "text_link":
+        if item.type == MessageEntityType.TEXT_LINK:
             urls.append(item.url)
-        elif item.type == "url":
+        elif item.type == MessageEntityType.URL:
             offset = item.offset
             length = item.length
             urls.append(text[offset * 2 : (offset + length) * 2].decode("utf-16-le"))
@@ -206,8 +215,9 @@ def check_image(path: Union[str, os.PathLike]) -> bool:
         with Image.open(path) as image:
             image.verify()
 
+        # verify() does not detect all the possible image defects
+        # e.g. truncated images, try to open the image to detect
         with Image.open(path) as image:
-            image = Image.open(path)
             image.load()
         return True
     except OSError as error:
@@ -217,8 +227,6 @@ def check_image(path: Union[str, os.PathLike]) -> bool:
 
 async def run_in_pool(tasks: Iterable[Coroutine], pool_size: int):
     scheduler = await aiojobs.create_scheduler(limit=pool_size)
-    jobs: List[aiojobs.Job] = []
-    for task in tasks:
-        jobs.append(await scheduler.spawn(task))
+    jobs: List[aiojobs.Job] = [await scheduler.spawn(task) for task in tasks]
     await asyncio.gather(*[job.wait() for job in jobs])
     await scheduler.close()

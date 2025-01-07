@@ -14,11 +14,13 @@ class BaseAPI:
     def build_caption(tweet) -> Caption:
         return Caption(
             {
-                "url": f"https://twitter.com/{tweet['user']['screen_name']}"
-                + f"/status/{tweet['id_str']}",
+                "url": (
+                    f"https://twitter.com/{tweet['user']['screen_name']}"
+                    f"/status/{tweet['id_str']}"
+                ),
                 "author": f"{tweet['user']['name']} #{tweet['user']['screen_name']}",
                 "text": tweet["text"],
-            }
+            },
         )
 
     @staticmethod
@@ -69,7 +71,7 @@ class BaseAPI:
             if variant["content_type"] != "video/mp4":
                 continue
             # https://video.twimg.com/amplify_video/1625137841473982464/vid/720x954/YzLr5Rw4xODqTpkm.mp4?tag=16
-            bitrate = variant["bitrate"] if "bitrate" in variant else 0
+            bitrate = variant.get("bitrate", 0)
             if bitrate > max_bitrate:
                 max_bitrate = variant["bitrate"]
                 best_variant = variant["url"]
@@ -81,7 +83,7 @@ class BaseAPI:
         file = File(filename, best_variant, destination)
         async with Request() as session:
             await file.download(session)
-        return Ugoira(file, BaseAPI.build_caption(tweet), tweet)
+        return Ugoira(int(tweet["id_str"]), file, BaseAPI.build_caption(tweet), tweet)
 
     @staticmethod
     def parse_photo(tweet: dict, photo: dict, index: int):

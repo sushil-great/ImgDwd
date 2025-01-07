@@ -9,7 +9,7 @@ class NazurinError(Exception):
         return self.msg
 
 
-class InvalidCommandUsage(NazurinError):
+class InvalidCommandUsageError(NazurinError):
     """Raised when a command is used incorrectly."""
 
     command: str
@@ -17,3 +17,8 @@ class InvalidCommandUsage(NazurinError):
     def __init__(self, command):
         self.command = command
         super().__init__(f"Invalid usage of command {command}")
+
+
+class AlreadyExistsError(NazurinError):
+    def __init__(self, msg="Already exists in database, skipped update."):
+        super().__init__(msg)

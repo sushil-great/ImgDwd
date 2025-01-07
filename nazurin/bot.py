@@ -1,18 +1,22 @@
 import asyncio
+from time import time
 from typing import List, Optional
 
-from aiogram import Bot
-from aiogram.types import ChatActions, InputFile, InputMediaPhoto, Message
-from aiogram.types.message import ParseMode
-from aiogram.utils.exceptions import BadRequest
+from aiogram import Bot, flags
+from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.enums import ChatAction, ParseMode
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import FSInputFile, InputMediaPhoto, Message
 
 from nazurin import config
+from nazurin.database import Database
 from nazurin.models import File, Illust, Image, Ugoira
 from nazurin.sites import SiteManager
 from nazurin.storage import Storage
 from nazurin.utils import logger
 from nazurin.utils.decorators import retry_after
-from nazurin.utils.exceptions import NazurinError
+from nazurin.utils.exceptions import AlreadyExistsError, NazurinError
 from nazurin.utils.helpers import (
     handle_bad_request,
     remove_files_older_than,
@@ -24,7 +28,14 @@ class NazurinBot(Bot):
     send_message = retry_after(Bot.send_message)
 
     def __init__(self, *args, **kwargs):
-        super().__init__(parse_mode=ParseMode.HTML, *args, **kwargs)
+        session = AiohttpSession(proxy=config.PROXY) if config.PROXY else None
+        super().__init__(
+            *args,
+            token=config.TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+            session=session,
+            **kwargs,
+        )
         self.sites = SiteManager()
         self.storage = Storage()
         self.cleanup_task = None
@@ -41,6 +52,7 @@ class NazurinBot(Bot):
             self.cleanup_task.cancel()
 
     @retry_after
+    @flags.chat_action(ChatAction.UPLOAD_PHOTO)
     async def send_single_group(
         self,
         imgs: List[Image],
@@ -48,15 +60,16 @@ class NazurinBot(Bot):
         chat_id: int,
         reply_to: Optional[int] = None,
     ):
-        await self.send_chat_action(chat_id, ChatActions.UPLOAD_PHOTO)
-        media = []
-        for img in imgs:
-            media.append(InputMediaPhoto(await img.display_url()))  # TODO
+        # TODO: Fetch display URL in batch
+        media = [InputMediaPhoto(media=await img.display_url()) for img in imgs]
         media[0].caption = caption
         await self.send_media_group(chat_id, media, reply_to_message_id=reply_to)
 
     async def send_photos(
-        self, illust: Illust, chat_id: int, reply_to: Optional[int] = None
+        self,
+        illust: Illust,
+        chat_id: int,
+        reply_to: Optional[int] = None,
     ):
         caption = sanitize_caption(illust.caption)
         groups = []
@@ -86,24 +99,29 @@ class NazurinBot(Bot):
             if isinstance(illust, Ugoira):
                 await self.send_animation(
                     chat_id,
-                    InputFile(illust.video.path),
+                    FSInputFile(illust.video.path),  # TODO: Handle URL
                     caption=sanitize_caption(illust.caption),
                     reply_to_message_id=reply_to,
                 )
             else:
                 await self.send_photos(illust, chat_id, reply_to)
-        except BadRequest as error:
+        except TelegramBadRequest as error:
             await handle_bad_request(message, error)
 
     @retry_after
+    @flags.chat_action(ChatAction.UPLOAD_DOCUMENT)
     async def send_doc(self, file: File, chat_id, message_id=None):
-        await self.send_chat_action(chat_id, ChatActions.UPLOAD_DOCUMENT)
         await self.send_document(
-            chat_id, InputFile(file.path), reply_to_message_id=message_id
+            chat_id,
+            FSInputFile(file.path),
+            reply_to_message_id=message_id,
         )
 
     async def send_docs(
-        self, illust: Illust, message: Optional[Message] = None, chat_id=None
+        self,
+        illust: Illust,
+        message: Optional[Message] = None,
+        chat_id=None,
     ):
         if message:
             message_id = message.message_id
@@ -114,47 +132,61 @@ class NazurinBot(Bot):
         for file in illust.all_files:
             await self.send_doc(file, chat_id, message_id)
 
+    async def send_to_gallery(
+        self,
+        urls: List[str],
+        illust: Illust,
+        message: Optional[Message] = None,
+    ):
+        if isinstance(illust, Ugoira):
+            await self.send_illust(illust, message, config.GALLERY_ID)
+        elif (
+            message
+            and message.forward_origin is not None
+            and message.photo
+            # If there're multiple images,
+            # then send a new message instead of forwarding an existing one,
+            # since we currently can't forward albums correctly.
+            and not illust.has_multiple_images()
+        ):
+            await message.forward(config.GALLERY_ID)
+        elif not illust.has_image():
+            await self.send_message(config.GALLERY_ID, "\n".join(urls))
+        else:
+            await self.send_illust(illust, message, config.GALLERY_ID)
+
     async def update_collection(
-        self, urls: List[str], message: Optional[Message] = None
+        self,
+        urls: List[str],
+        message: Optional[Message] = None,
     ):
         result = self.sites.match(urls)
         if not result:
             raise NazurinError("No source matched")
         logger.info(
-            "Collection update: site={}, match={}",
-            result["site"],
-            result["match"].groups(),
+            "Collection update: source={}, match={}",
+            result.source.name,
+            result.match.groups(),
         )
 
-        illust = await self.sites.handle_update(result)
+        illust, document = await self.sites.handle_update(result)
+
+        db = Database().driver()
+        collection = db.collection(document.collection)
+        if await collection.document(document.id).exists():
+            raise AlreadyExistsError
 
         # Send / Forward to gallery & Save to album
         download = asyncio.create_task(illust.download())
-
         if config.GALLERY_ID:
-            task = None
-            if isinstance(illust, Ugoira):
-                task = self.send_illust(illust, message, config.GALLERY_ID)
-            elif (
-                message
-                and message.is_forward()
-                and message.photo
-                # If there're multiple images,
-                # then send a new message instead of forwarding an existing one,
-                # since we currently can't forward albums correctly.
-                and not illust.has_multiple_images()
-            ):
-                task = message.forward(config.GALLERY_ID)
-            elif not illust.has_image():
-                task = self.send_message(config.GALLERY_ID, "\n".join(urls))
-            else:
-                task = self.send_illust(illust, message, config.GALLERY_ID)
-            save = asyncio.create_task(task)
+            save = asyncio.create_task(self.send_to_gallery(urls, illust, message))
             await asyncio.gather(save, download)
         else:
             await download
 
         await self.storage.store(illust)
+        document.data["collected_at"] = time()
+        await collection.insert(document.id, document.data)
         return True
 
     async def cleanup_temp_dir(self):

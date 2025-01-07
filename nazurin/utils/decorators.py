@@ -1,10 +1,10 @@
 import asyncio
 import functools
 from functools import partial, wraps
+from typing import Callable, ClassVar, List
 
 import tenacity
-from aiogram.types import ChatActions, Message
-from aiogram.utils.exceptions import RetryAfter
+from aiogram.exceptions import TelegramRetryAfter
 from aiohttp import ClientError, ClientResponseError
 from async_lru import alru_cache
 from tenacity import retry_if_exception, stop_after_attempt, wait_exponential
@@ -42,21 +42,6 @@ network_retry = tenacity.retry(
 )
 
 
-def chat_action(action: str):
-    """Sends `action` while processing."""
-
-    def decorator(func):
-        @wraps(func)
-        async def wrapped_func(message: Message, *args, **kwargs):
-            await asyncio.create_task(ChatActions._do(action))
-            result = await asyncio.create_task(func(message, *args, **kwargs))
-            return result
-
-        return wrapped_func
-
-    return decorator
-
-
 def async_wrap(func):
     """Transform a synchronous function to an asynchronous one."""
 
@@ -79,17 +64,18 @@ def retry_after(func):
             try:
                 result = await func(*args, **kwargs)
                 return result
-            except RetryAfter as error:
+            except TelegramRetryAfter as error:
                 logger.opt(depth=1).warning(
-                    "Hit flood limit, retry after {} seconds", error.timeout + 1
+                    "Hit flood limit, retry after {} seconds",
+                    error.retry_after + 1,
                 )
-                await asyncio.sleep(error.timeout + 1)
+                await asyncio.sleep(error.retry_after + 1)
 
     return decorator
 
 
 class Cache:
-    cached_functions = []
+    cached_functions: ClassVar[List[Callable]] = []
 
     @staticmethod
     def lru(*args, **kwargs):

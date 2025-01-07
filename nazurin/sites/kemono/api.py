@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timezone
 from mimetypes import guess_type
-from typing import Tuple
+from typing import ClassVar, Tuple, Union
 
 from bs4 import BeautifulSoup
 
@@ -15,36 +15,69 @@ from .config import DESTINATION, FILENAME
 
 
 class Kemono:
+    API_BASE: ClassVar[str] = "https://kemono.su/api/v1"
+
     @network_retry
     async def get_post(self, service: str, user_id: str, post_id: str) -> dict:
         """Fetch an post."""
-        api = f"https://kemono.su/api/v1/{service}/user/{user_id}/post/{post_id}"
-        async with Request() as request:
-            async with request.get(api) as response:
-                response.raise_for_status()
-                post = await response.json()
-                if not post:
-                    raise NazurinError("Post not found")
-                username = await self.get_username(service, user_id)
-                post["username"] = username
-                return post
+        api = f"{self.API_BASE}/{service}/user/{user_id}/post/{post_id}"
+        async with Request() as request, request.get(api) as response:
+            response.raise_for_status()
+            post = await response.json()
+            if not post:
+                raise NazurinError("Post not found")
+            username = await self.get_username(service, user_id)
+            post["username"] = username
+            return post
+
+    @network_retry
+    async def get_post_revision(
+        self,
+        service: str,
+        user_id: str,
+        post_id: str,
+        revision_id: str,
+    ) -> dict:
+        """Fetch a post revision."""
+        api = f"{self.API_BASE}/{service}/user/{user_id}/post/{post_id}/revisions"
+        async with Request() as request, request.get(api) as response:
+            response.raise_for_status()
+            revisions = await response.json()
+            post = None
+            for revision in revisions:
+                if str(revision["revision_id"]) == revision_id:
+                    post = revision
+                    break
+            if not post:
+                raise NazurinError("Post revision not found")
+            username = await self.get_username(service, user_id)
+            post["username"] = username
+            return post
 
     @network_retry
     async def get_username(self, service: str, user_id: str) -> str:
         url = f"https://kemono.su/{service}/user/{user_id}"
-        async with Request() as request:
-            async with request.get(url) as response:
-                response.raise_for_status()
-                response = await response.text()
-                soup = BeautifulSoup(response, "html.parser")
-                tag = soup.find("meta", attrs={"name": "artist_name"})
-                if not tag:
-                    return ""
-                username = tag.get("content", "")
-                return username
+        async with Request() as request, request.get(url) as response:
+            response.raise_for_status()
+            response_text = await response.text()
+            soup = BeautifulSoup(response_text, "html.parser")
+            tag = soup.find("meta", attrs={"name": "artist_name"})
+            if not tag:
+                return ""
+            username = tag.get("content", "")
+            return username
 
-    async def fetch(self, service: str, user_id: str, post_id: str) -> Illust:
-        post = await self.get_post(service, user_id, post_id)
+    async def fetch(
+        self,
+        service: str,
+        user_id: str,
+        post_id: str,
+        revision_id: Union[str, None],
+    ) -> Illust:
+        if revision_id:
+            post = await self.get_post_revision(service, user_id, post_id, revision_id)
+        else:
+            post = await self.get_post(service, user_id, post_id)
         caption = self.build_caption(post)
 
         images = []
@@ -70,7 +103,9 @@ class Kemono:
 
             # Handle images
             destination, filename = self.get_storage_dest(
-                post, f"{image_index} - {file['name']}", path
+                post,
+                f"{image_index} - {file['name']}",
+                path,
             )
             thumbnail = "https://img.kemono.su/thumbnail/data" + path
             images.append(
@@ -79,11 +114,12 @@ class Kemono:
                     url,
                     destination,
                     thumbnail,
-                )
+                ),
             )
             image_index += 1
 
-        return Illust(images, caption, post, download_files)
+        identifier = filter(lambda x: x, [service, user_id, post_id, revision_id])
+        return Illust("_".join(identifier), images, caption, post, download_files)
 
     @staticmethod
     def get_storage_dest(post: dict, pretty_name: str, path: str) -> Tuple[str, str]:
@@ -114,16 +150,24 @@ class Kemono:
         return (DESTINATION.format_map(context), filename + extension)
 
     @staticmethod
+    def get_url(post: dict) -> str:
+        url = (
+            f"https://kemono.su/{post['service']}"
+            f"/user/{post['user']}/post/{post['id']}"
+        )
+        revision = post.get("revision_id")
+        if revision:
+            url += f"/revision/{post['revision_id']}"
+        return url
+
+    @staticmethod
     def build_caption(post) -> Caption:
         return Caption(
             {
                 "title": post["title"],
                 "author": "#" + post["username"],
-                "url": (
-                    f"https://kemono.su/{post['service']}"
-                    f"/user/{post['user']}/post/{post['id']}"
-                ),
-            }
+                "url": Kemono.get_url(post),
+            },
         )
 
     @staticmethod

@@ -18,19 +18,22 @@ class Weibo:
     async def get_post(self, post_id: str):
         """Fetch a post."""
         api = f"https://m.weibo.cn/detail/{post_id}"
-        async with Request() as request:
-            async with request.get(api) as response:
-                response.raise_for_status()
-                html = await response.text()
-                post = self.parse_html(html)
-                return post
+        async with Request() as request, request.get(api) as response:
+            response.raise_for_status()
+            html = await response.text()
+            post = self.parse_html(html)
+            return post
 
     async def fetch(self, post_id: str) -> WeiboIllust:
         post = await self.get_post(post_id)
         imgs = self.get_images(post)
         caption = self.build_caption(post)
         return WeiboIllust(
-            imgs, caption, post, referer=f"https://m.weibo.cn/detail/{post_id}"
+            int(post["mid"]),
+            imgs,
+            caption,
+            post,
+            referer=f"https://m.weibo.cn/detail/{post_id}",
         )
 
     def get_images(self, post) -> List[WeiboImage]:
@@ -51,7 +54,7 @@ class Weibo:
                     width=width,
                     height=height,
                     referer=f"https://m.weibo.cn/detail/{post['mid']}",
-                )
+                ),
             )
         return imgs
 
@@ -76,7 +79,7 @@ class Weibo:
     def build_caption(self, post) -> Caption:
         user = post["user"]
         tags = self.get_tags(post)
-        tag_string = str()
+        tag_string = ""
         for tag in tags:
             tag_string += "#" + tag + " "
         return Caption(
@@ -86,7 +89,7 @@ class Weibo:
                 "desktop_url": f"https://weibo.com/{user['id']}/{post['bid']}",
                 "mobile_url": f"https://m.weibo.cn/detail/{post['mid']}",
                 "tags": tag_string,
-            }
+            },
         )
 
     @staticmethod

@@ -1,7 +1,7 @@
-from time import time
+import re
 
-from nazurin.database import Database
-from nazurin.models import Illust
+from nazurin.models import Document
+from nazurin.sites import HandlerResult
 
 from .api import Wallhaven
 from .config import COLLECTION
@@ -9,15 +9,12 @@ from .config import COLLECTION
 patterns = [
     # http://whvn.cc/94x38z
     # https://wallhaven.cc/w/94x38z
-    r"(?:wallhaven|whvn)\.cc\/(?:w\/)?([\w]+)"
+    r"(?:wallhaven|whvn)\.cc\/(?:w\/)?([\w]+)",
 ]
 
 
-async def handle(match) -> Illust:
+async def handle(match: re.Match) -> HandlerResult:
     wallpaper_id = match.group(1)
-    db = Database().driver()
-    collection = db.collection(COLLECTION)
     illust = await Wallhaven().fetch(wallpaper_id)
-    illust.metadata["collected_at"] = time()
-    await collection.insert(wallpaper_id, illust.metadata)
-    return illust
+    document = Document(id=illust.id, collection=COLLECTION, data=illust.metadata)
+    return illust, document
